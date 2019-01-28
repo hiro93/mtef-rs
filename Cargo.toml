@@ -1,0 +1,8 @@
+[package]
+name = "mtef-rs"
+version = "0.1.0"
+authors = ["hiro"]
+edition = "2018"
+
+[dependencies]
+ole = "0.1.15"

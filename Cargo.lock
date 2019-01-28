@@ -1,0 +1,14 @@
+[[package]]
+name = "mtef-rs"
+version = "0.1.0"
+dependencies = [
+ "ole 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "ole"
+version = "0.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[metadata]
+"checksum ole 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)" = "4f0add6eeb62fdaf7afd332d52763f27d365cfd047f95e232671532c1efb3a66"
