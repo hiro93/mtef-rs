@@ -1,7 +1,13 @@
 [[package]]
+name = "byteorder"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "mtef-rs"
 version = "0.1.0"
 dependencies = [
+ "byteorder 1.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "ole 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -11,4 +17,5 @@ version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [metadata]
+"checksum byteorder 1.3.1 (registry+https://github.com/rust-lang/crates.io-index)" = "a019b10a2a7cdeb292db131fc8113e57ea2a908f6e7894b0c3c671893b65dbeb"
 "checksum ole 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)" = "4f0add6eeb62fdaf7afd332d52763f27d365cfd047f95e232671532c1efb3a66"

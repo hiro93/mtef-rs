@@ -6,3 +6,4 @@ edition = "2018"
 
 [dependencies]
 ole = "0.1.15"
+byteorder = "1"
