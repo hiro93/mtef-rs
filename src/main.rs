@@ -1,5 +1,6 @@
 extern crate byteorder;
 extern crate ole;
+extern crate encoding;
 
 mod eqn;
 mod error;
