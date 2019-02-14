@@ -9,4 +9,6 @@ mod error;
 fn main() {
     let eqn = eqn::MTEquation::from_ole("assets/oleObject1.bin").unwrap();
     println!("{:?}", eqn);
+    let latex = eqn.translate();
+    println!("{:?}", latex);
 }

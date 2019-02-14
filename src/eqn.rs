@@ -2,8 +2,10 @@ use std::io::{Cursor, Read};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::BufRead;
-use encoding::{DecoderTrap, decode};
-use encoding::all::UTF_8;
+use encoding::{Encoding, DecoderTrap};
+use encoding::all::{GBK, UTF_8};
+use std::borrow::Cow;
+
 
 #[derive(Debug)]
 pub struct MTEquation {
@@ -15,64 +17,48 @@ pub struct MTEquation {
     m_application: String,
     m_inline: u8,
 
+    encoding_defs: Vec<MTRecords>,
     records: Vec<MTRecords>,
 }
 
 #[derive(Debug)]
-enum MTCharacter {
-    /// The MTCode value defines the character independent of its font.
-    /// MTCode is a superset of Unicode and is described in MTCode Encoding Tables.
-    MTCode { value: u16 },
-    /// The 8-bit and 16-bit font positions are mutually exclusive but may both be absent.
-    /// This is the position of the character within its font.
-    /// Some of the common font encodings are given in Font Encoding Tables.
-    FontPosition { value: u16 },
+enum MTRecords {
+    END,
+    LINE(MTLine),
+    CHAR(MTChar),
+    TMPL(MTTmpl),
+    ENCODING_DEF(String),
+    FONT_DEF { enc_def_index: u8, name: String },
+    FONT_STYLE_DEF { font_def_index: u8, char_style: u8 },
+    EQN_PREFS { sizes: Vec<String>, spaces: Vec<String>, styles: Vec<Option<u8>> },
+    FULL, SUB, SUB2, SYM, SUBSYM,
+    FUTURE,
 }
-
 
 
 #[derive(Debug)]
-enum MTRecords {
-    END,
-    /// LINE record (1):
-    /// Consists of:
-    /// - record type (1)
-    /// - options
-    /// - [nudge] if mtefOPT_NUDGE is set
-    /// - [line spacing] if mtefOPT_LINE_LSPACE is set (16-bit integer)
-    /// - [RULER record] if mtefOPT_LP_RULER is set
-    /// - object list contents of line (a single pile, characters and templates, or nothing)
-    LINE {
-        record_type: u8,
-        options: u8,
-        nudge: u8,
-        line_spacing: u16,
-//        ruler_record: vec![],
-//        object_list: vec![],
-    },
-
-    /// CHAR record (2):
-    /// Consists of:
-    /// - record type (2)
-    /// - options
-    /// - [nudge] if mtefOPT_NUDGE is set
-    /// - [typeface] typeface value (signed integer; see FONT below)
-    /// - [character] character value (see below)
-    /// - [embellishment list] if mtefOPT_CHAR_EMBELL is set (embellishments)
-    CHAR {
-        record_type: u8,
-        options: u8,
-        nudge: u8,
-        typeface: i32,
-        character: MTCharacter
-    },
-
-    ENCODING_DEF { name: String },
-    FUTURE
+struct MTLine {
+    nudge: (u16, u16),
+    line_spacing: u8,
+    null: bool,
 }
 
+#[derive(Debug)]
+struct MTTmpl {
+    nudge: (u16, u16),
+    selector: u8,
+    variation: u16,
+    options: u8
+}
 
-
+#[derive(Debug)]
+struct MTChar {
+    nudge: (u16, u16),
+    typeface: u8,
+    mtcode: u16,
+    fp8: u8,
+    fp16: u16,
+}
 
 impl MTEquation {
     /// How MTEF is stored in files and objects
@@ -112,62 +98,136 @@ impl MTEquation {
     /// These are given for reference purposes and are handy for reducing error when such values are communicated by humans.
     pub fn parse(buf: Vec<u8>) -> Result<MTEquation, super::error::Error> {
         let mut cur = Cursor::new(buf);
-        println!("{:?}", cur);
         let mut eqn = MTEquation {
             m_mtef_ver: cur.read_u8().unwrap(),
             m_platform: cur.read_u8().unwrap(),
             m_product: cur.read_u8().unwrap(),
             m_version: cur.read_u8().unwrap(),
             m_version_sub: cur.read_u8().unwrap(),
-            m_application: "".to_string(),
-            m_inline: 0,
+            m_application: read_null_terminated_string(&mut cur).unwrap(),
+            m_inline: cur.read_u8().unwrap(),
+            encoding_defs: vec![
+                MTRecords::ENCODING_DEF("MTCode".to_string()),
+                MTRecords::ENCODING_DEF("Unknown".to_string()),
+                MTRecords::ENCODING_DEF("Symbol".to_string()),
+                MTRecords::ENCODING_DEF("MTExtra".to_string()),
+            ],
             records: vec![],
         };
-        let mut m_application = vec![];
-        cur.read_until(b'\0', &mut m_application).unwrap();
-        eqn.m_application = String::from_utf8(m_application).unwrap();
-        eqn.m_inline = cur.read_u8().unwrap();
         loop {
             match cur.read_u8() {
                 Ok(END) => eqn.records.push(MTRecords::END),
-                Ok(LINE) => { println!("LINE") }
-                Ok(CHAR) => { println!("CHAR") }
-                Ok(TMPL) => { println!("TMPL") }
+                Ok(LINE) => {
+                    let options = cur.read_u8().unwrap();
+                    let mut line = MTLine {
+                        nudge: (0, 0),
+                        line_spacing: 0,
+                        null: false,
+                    };
+                    if MTEF_OPT_NUDGE == MTEF_OPT_NUDGE & options {
+                        line.nudge = read_nudge_values(&mut cur)
+                    }
+                    if MTEF_OPT_LINE_LSPACE == MTEF_OPT_LINE_LSPACE & options {
+                        line.line_spacing = cur.read_u8().unwrap()
+                    }
+                    if MTEF_OPT_LINE_NULL == MTEF_OPT_LINE_NULL & options {
+                        line.null = true
+                    }
+                    eqn.records.push(MTRecords::LINE(line))
+                }
+                Ok(CHAR) => {
+                    let mut ch = MTChar { nudge: (0, 0), typeface: 0, mtcode: 0, fp8: 0, fp16: 0 };
+                    let options = cur.read_u8().unwrap();
+                    if MTEF_OPT_NUDGE == MTEF_OPT_NUDGE & options {
+                        ch.nudge = read_nudge_values(&mut cur)
+                    }
+                    ch.typeface = cur.read_u8().unwrap();
+
+                    if MTEF_OPT_CHAR_ENC_NO_MTCODE != MTEF_OPT_CHAR_ENC_NO_MTCODE & options {
+                        ch.mtcode = cur.read_u16::<LittleEndian>().unwrap()
+                    }
+                    if MTEF_OPT_CHAR_ENC_CHAR_8 == MTEF_OPT_CHAR_ENC_CHAR_8 & options {
+                        ch.fp8 = cur.read_u8().unwrap();
+                    }
+                    if MTEF_OPT_CHAR_ENC_CHAR_16 == MTEF_OPT_CHAR_ENC_CHAR_16 & options {
+                        ch.fp16 = cur.read_u16::<LittleEndian>().unwrap();
+                    }
+                    let record = MTRecords::CHAR(ch);
+                    eqn.records.push(record)
+                }
+                Ok(TMPL) => {
+                    let mut tmpl = MTTmpl { nudge: (0, 0), selector: 0, variation: 0, options: 0 };
+                    let options = cur.read_u8().unwrap();
+                    if MTEF_OPT_NUDGE == MTEF_OPT_NUDGE & options {
+                        tmpl.nudge = read_nudge_values(&mut cur)
+                    }
+                    tmpl.selector = cur.read_u8().unwrap();
+
+                    // variation, 1 or 2 bytes
+                    let byte1 = cur.read_u8().unwrap() as u16;
+                    tmpl.variation = match 0x80 == byte1 & 0x80 {
+                        true => {
+                            let byte2 = cur.read_u8().unwrap() as u16;
+                            (byte1 & 0x7F) | (byte2 << 8)
+                        },
+                        false => { byte1 }
+                    };
+                    tmpl.options = cur.read_u8().unwrap();
+                    let record = MTRecords::TMPL(tmpl);
+                    eqn.records.push(record)
+                }
                 Ok(PILE) => { println!("PILE") }
                 Ok(EMBELL) => { println!("EMBELL") }
                 Ok(MATRIX) => { println!("MATRIX") }
                 Ok(RULER) => { println!("RULER") }
-                Ok(FONT_STYLE_DEF) => { println!("FONT_STYLE_DEF") }
+                Ok(FONT_STYLE_DEF) => {
+                    let record = MTRecords::FONT_STYLE_DEF {
+                        font_def_index: cur.read_u8().unwrap(),
+                        char_style: cur.read_u8().unwrap()
+                    };
+                    eqn.records.push(record)
+                }
                 Ok(SIZE) => { println!("SIZE") }
-                Ok(FULL) => { println!("FULL") }
-                Ok(SUB) => { println!("SUB") }
-                Ok(SUB2) => { println!("SUB2") }
-                Ok(SYM) => { print!("SYM"); }
-                Ok(SUBSYM) => { println!("SUBSYM") }
+                Ok(FULL) => eqn.records.push(MTRecords::FULL),
+                Ok(SUB) => eqn.records.push(MTRecords::SUB),
+                Ok(SUB2) => eqn.records.push(MTRecords::SUB2),
+                Ok(SYM) => eqn.records.push(MTRecords::SYM),
+                Ok(SUBSYM) => eqn.records.push(MTRecords::SUBSYM),
                 Ok(COLOR) => { println!("COLOR") }
                 Ok(COLOR_DEF) => { println!("COLOR_DEF") }
                 Ok(FONT_DEF) => {
-                    let enc_def_index = cur.read_u8().unwrap();
-                    let mut name = vec![];
-                    cur.read_until(b'\0', &mut name);
-//                    let name = String::from_utf8(name).unwrap_or_default();
-                    println!("FONT_DEF: {}, {:?}", enc_def_index, name);
+                    let record = MTRecords::FONT_DEF {
+                        enc_def_index: cur.read_u8().unwrap(),
+                        name: read_null_terminated_string(&mut cur).unwrap(),
+                    };
+                    eqn.records.push(record)
                 }
                 Ok(EQN_PREFS) => {
-                    let options = cur.read_u8().unwrap();
+                    let _options = cur.read_u8().unwrap();
+
+                    // sizes
                     let size = cur.read_u8().unwrap();
-                    println!("EQN_PREFS: options={}, size={}", options, size);
+                    let sizes = read_dimension_arrays(&mut cur, size).unwrap();
+
+                    // spaces
+                    let size = cur.read_u8().unwrap();
+                    let spaces = read_dimension_arrays(&mut cur, size).unwrap();
+
+                    // styles
+                    let size = cur.read_u8().unwrap();
+                    let mut styles = vec![];
+                    for _i in 0..size {
+                        let c = cur.read_u8().unwrap();
+                        match c == 0 {
+                            true => { styles.push(None) },
+                            false => { styles.push(Some(cur.read_u8().unwrap())) }
+                        }
+                    }
+                    let record = MTRecords::EQN_PREFS { sizes, spaces, styles };
+                    eqn.records.push(record)
                 }
-                Ok(ENCODING_DEF) => {
-                    let mut name = vec![];
-                    cur.read_until(b'\0', &mut name);
-                    let name = String::from_utf8(name).unwrap();
-//                    let name = read_null_terminated_string(&mut cur);
-//                    println!("ENCODING_DEF: {:?}", name);
-                    let record = MTRecords::ENCODING_DEF { name };
-                    println!("{:?}", record);
-//                    t.records.push(MTRecords::ENCODING_DEF { name });
-                }
+                Ok(ENCODING_DEF) => eqn.records.push(
+                    MTRecords::ENCODING_DEF(read_null_terminated_string(&mut cur).unwrap())),
                 Ok(FUTURE) => eqn.records.push(MTRecords::FUTURE),
                 Ok(_) => eqn.records.push(MTRecords::FUTURE),
                 Err(_e) => break
@@ -178,6 +238,14 @@ impl MTEquation {
 }
 
 
+impl MTEquation {
+    pub fn translate(&self) -> Result<String, super::error::Error> {
+        for record in &self.records {
+            println!("{:?}", record);
+        }
+        Ok("hello".to_string())
+    }
+}
 /// How MTEF is Stored in Files and Objects
 /// http://web.archive.org/web/20010304111449/http://mathtype.com/support/tech/MTEF_storage.htm#OLE%20Objects
 /// OLE Equation Objects
@@ -264,10 +332,104 @@ const ENCODING_DEF: u8 = 19;
 /// >= 100 	FUTURE 	for future expansion (see below)
 const FUTURE: u8 = 100;
 
+/// nudge values follow tag
+const MTEF_OPT_NUDGE: u8 = 0x08;
+// line is a placeholder only (i.e. not displayed)
+const MTEF_OPT_LINE_NULL: u8 = 0x01;
+// line spacing value follows tag
+const MTEF_OPT_LINE_LSPACE: u8 = 0x04;
+// RULER record follows LINE or PILE record
+const MTEF_OPT_LP_RULER: u8 = 0x02;
+/// Option flag values for CHAR records:
+// character is followed by an embellishment list
+const MTEF_OPT_CHAR_EMBELL: u8 = 0x01;
+// character starts a function (sin, cos, etc.)
+const MTEF_OPT_CHAR_FUNC_START: u8 = 0x02;
+// character is written with an 8-bit encoded value
+const MTEF_OPT_CHAR_ENC_CHAR_8: u8 = 0x04;
+// character is written with an 16-bit encoded value
+const MTEF_OPT_CHAR_ENC_CHAR_16: u8 = 0x10;
+// character is written without an 16-bit MTCode value
+const MTEF_OPT_CHAR_ENC_NO_MTCODE: u8 = 0x20;
 
-fn read_null_terminated_string(cur: &mut Cursor<&Vec<u8>>) -> String {
-
+fn read_null_terminated_string(cur: &mut Cursor<Vec<u8>>) -> Result<String, Cow<'static, str>> {
     let mut buf = vec![];
     cur.read_until(b'\0', &mut buf).unwrap();
-    decode(buf.as_slice(), DecoderTrap::Strict, UTF_8)
+    buf.pop();
+    // TODO: or UTF_8 encase of Windows English version.
+    GBK.decode(buf.as_slice(), DecoderTrap::Strict)
+}
+
+fn read_dimension_arrays(cur: &mut Cursor<Vec<u8>>, size: u8) -> Result<Vec<String>, super::error::Error> {
+    let mut count = 0;
+    let mut new_str = true;
+    let mut tmp_str = String::new();
+    let mut vec = vec![];
+
+    let mut fx = |x: u8, s: &mut String, flag: &bool| -> Result<(), super::error::Error> {
+        match flag {
+            true => match x {
+                0x00 => s.push_str("in"),
+                0x01 => s.push_str("cm"),
+                0x02 => s.push_str("pt"),
+                0x03 => s.push_str("pc"),
+                0x04 => s.push_str("%"),
+                _ => {
+                    return Err(super::error::Error::InvalidOLEFile);
+                }
+            },
+            false => match x {
+                0x00 => s.push('0'),
+                0x01 => s.push('1'),
+                0x02 => s.push('2'),
+                0x03 => s.push('3'),
+                0x04 => s.push('4'),
+                0x05 => s.push('5'),
+                0x06 => s.push('6'),
+                0x07 => s.push('7'),
+                0x08 => s.push('8'),
+                0x09 => s.push('9'),
+                0x0a => s.push('.'),
+                0x0b => s.push('-'),
+                0x0f => {
+                    vec.push(s.clone());
+                    s.clear();
+                }
+                _ => {
+                    return Err(super::error::Error::InvalidOLEFile);
+                }
+            }
+        }
+        Ok(())
+    };
+
+    while count < size {
+        let ch = cur.read_u8().unwrap();
+        let hi = (ch & 0xF0)/16;
+        let lo = ch & 0x0F;
+        fx(hi, &mut tmp_str, &new_str).unwrap();
+        new_str = false;
+        if hi == 0x0f {
+            new_str = true;
+            count += 1;
+        }
+
+        fx(lo, &mut tmp_str, &new_str).unwrap();
+        new_str = false;
+        if lo == 0x0f {
+            new_str = true;
+            count += 1;
+        }
+    }
+    Ok(vec)
+}
+
+
+fn read_nudge_values(cur: &mut Cursor<Vec<u8>>) -> (u16, u16){
+    let b1 = cur.read_u8().unwrap();
+    let b2 = cur.read_u8().unwrap();
+    match b1 == 128 || b2 == 128 {
+        true => (cur.read_u16::<LittleEndian>().unwrap(), cur.read_u16::<LittleEndian>().unwrap()),
+        false => (b1 as u16, b2 as u16)
+    }
 }
