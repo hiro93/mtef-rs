@@ -4,6 +4,7 @@ extern crate encoding;
 
 mod eqn;
 mod error;
+mod constants;
 
 
 fn main() {

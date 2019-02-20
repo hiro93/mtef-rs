@@ -55,9 +55,9 @@ struct MTTmpl {
 struct MTChar {
     nudge: (u16, u16),
     typeface: u8,
-    mtcode: u16,
-    fp8: u8,
-    fp16: u16,
+    mtcode: Option<u16>,
+    fp8: Option<u8>,
+    fp16: Option<u16>,
 }
 
 impl MTEquation {
@@ -136,7 +136,8 @@ impl MTEquation {
                     eqn.records.push(MTRecords::LINE(line))
                 }
                 Ok(CHAR) => {
-                    let mut ch = MTChar { nudge: (0, 0), typeface: 0, mtcode: 0, fp8: 0, fp16: 0 };
+                    let mut ch = MTChar { nudge: (0, 0), typeface: 0,
+                        mtcode: None, fp8: None, fp16: None };
                     let options = cur.read_u8().unwrap();
                     if MTEF_OPT_NUDGE == MTEF_OPT_NUDGE & options {
                         ch.nudge = read_nudge_values(&mut cur)
@@ -144,13 +145,13 @@ impl MTEquation {
                     ch.typeface = cur.read_u8().unwrap();
 
                     if MTEF_OPT_CHAR_ENC_NO_MTCODE != MTEF_OPT_CHAR_ENC_NO_MTCODE & options {
-                        ch.mtcode = cur.read_u16::<LittleEndian>().unwrap()
+                        ch.mtcode = Some(cur.read_u16::<LittleEndian>().unwrap())
                     }
                     if MTEF_OPT_CHAR_ENC_CHAR_8 == MTEF_OPT_CHAR_ENC_CHAR_8 & options {
-                        ch.fp8 = cur.read_u8().unwrap();
+                        ch.fp8 = Some(cur.read_u8().unwrap());
                     }
                     if MTEF_OPT_CHAR_ENC_CHAR_16 == MTEF_OPT_CHAR_ENC_CHAR_16 & options {
-                        ch.fp16 = cur.read_u16::<LittleEndian>().unwrap();
+                        ch.fp16 = Some(cur.read_u16::<LittleEndian>().unwrap());
                     }
                     let record = MTRecords::CHAR(ch);
                     eqn.records.push(record)
@@ -240,9 +241,21 @@ impl MTEquation {
 
 impl MTEquation {
     pub fn translate(&self) -> Result<String, super::error::Error> {
+        let mut latex = String::new();
+
+        let tx_char = |record: &MTChar, tx: &mut String| {
+            if let Some(mtcode) = record.mtcode {
+                let s = String::from_utf16_lossy(&[mtcode]);
+                tx.push_str(&s);
+            }
+        };
         for record in &self.records {
-            println!("{:?}", record);
+            match record {
+                MTRecords::CHAR(ch) => tx_char(ch, &mut latex),
+                _ => {}
+            }
         }
+        println!("{:?}", latex);
         Ok("hello".to_string())
     }
 }
